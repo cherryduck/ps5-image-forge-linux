@@ -1,0 +1,3 @@
+[submodule "vendor/lazy_mkpfs"]
+	path = vendor/lazy_mkpfs
+	url = https://github.com/Nazky/Lazy_MkPFS.git
