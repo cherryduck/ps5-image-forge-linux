@@ -19,8 +19,8 @@ A self-contained Linux GUI application for creating PS5 game dump images in mult
 - **sudo access** (required for EXFAT wrapper formats: FFPFSC from folder, since it needs loop device access)
 - **UFS2Tool** (for FFPKG format):
   1. Download `linux-x64-selfcontained.zip` from [SvenGDK/UFS2Tool releases](https://github.com/SvenGDK/UFS2Tool/releases)
-  2. Extract into `UFS2Tool/linux-x64-selfcontained/` next to the app binary
-  3. Final structure: `.../UFS2Tool/linux-x64-selfcontained/ufs2tool` (plus supporting files)
+  2. Extract into `UFS2Tool/` next to the app binary
+  3. Final structure: `.../UFS2Tool/linux-x64-selfcontained/UFS2Tool` (plus supporting files)
 
 > Python, PyQt6, and all other dependencies are bundled in the standalone build — no separate installation needed.
 
