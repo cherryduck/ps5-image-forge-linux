@@ -51,7 +51,7 @@ class BatchBuildWorker(QThread):
     batch_item_start = pyqtSignal(int, int, str, str)  # idx, total, source_name, fmt
     batch_item_done = pyqtSignal(int, str)  # idx, output_path
     batch_item_failed = pyqtSignal(int, str)  # idx, error_msg
-    finished = pyqtSignal(int, int)  # succeeded, failed
+    batch_finished = pyqtSignal(int, int)  # succeeded, failed  (renamed to avoid shadowing QThread.finished)
     cancelled = pyqtSignal()
 
     def __init__(
@@ -104,7 +104,7 @@ class BatchBuildWorker(QThread):
                 self.batch_item_failed.emit(idx, str(e))
                 failed += 1
 
-        self.finished.emit(succeeded, failed)
+        self.batch_finished.emit(succeeded, failed)
 
     def _progress_for(self, idx: int, total: int):
         """Return a progress callback that scales within this item's slice."""
@@ -156,7 +156,7 @@ class BuildWorker(QThread):
 
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
-    finished = pyqtSignal(str)  # output path
+    build_finished = pyqtSignal(str)  # output path  (renamed to avoid shadowing QThread.finished)
     error = pyqtSignal(str)  # error message
     cancelled = pyqtSignal()  # emitted when user cancels
 
@@ -191,7 +191,7 @@ class BuildWorker(QThread):
                 cancel_event=self._cancel_event,
                 proc_callback=_track_proc,
             )
-            self.finished.emit(str(result))
+            self.build_finished.emit(str(result))
         except CancelledBuild:
             self.cancelled.emit()
         except KeyboardInterrupt:
@@ -715,8 +715,6 @@ class MainWindow(QMainWindow):
         self.build_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.hide()
-        self.build_worker = None
-        self.batch_worker = None
         self._check_ready()
 
     def _start_build(self) -> None:
@@ -765,7 +763,7 @@ class MainWindow(QMainWindow):
         )
         self.build_worker.log.connect(self._on_log)
         self.build_worker.progress.connect(self._on_progress)
-        self.build_worker.finished.connect(self._on_build_finished)
+        self.build_worker.build_finished.connect(self._on_build_finished)
         self.build_worker.error.connect(self._on_build_error)
         self.build_worker.cancelled.connect(self._on_build_cancelled)
         self.build_worker.start()
@@ -799,7 +797,7 @@ class MainWindow(QMainWindow):
         self.batch_worker.batch_item_start.connect(self._on_batch_item_start)
         self.batch_worker.batch_item_done.connect(self._on_batch_item_done)
         self.batch_worker.batch_item_failed.connect(self._on_batch_item_failed)
-        self.batch_worker.finished.connect(self._on_batch_finished)
+        self.batch_worker.batch_finished.connect(self._on_batch_finished)
         self.batch_worker.cancelled.connect(self._on_build_cancelled)
         self.batch_worker.start()
 
@@ -834,6 +832,14 @@ class MainWindow(QMainWindow):
         self.log_view.log(f"\n[DONE] Build completed successfully!")
         self.log_view.log(f"  Output: {output_path}")
 
+        # Schedule worker cleanup via Qt event loop to avoid race with
+        # QThread.finished signal delivery (worker may still have pending
+        # signals in the queue when this slot returns)
+        worker = self.build_worker
+        self.build_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
         QMessageBox.information(
             self,
             "Build Complete",
@@ -845,6 +851,12 @@ class MainWindow(QMainWindow):
         """Handle single build error."""
         self._restore_ui()
         self.progress_bar.setValue(0)
+
+        # Let Qt manage worker lifetime to avoid GC racing with QThread.finished
+        worker = self.build_worker
+        self.build_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
         self.log_view.log(f"\n[ERROR] Build failed: {error_msg}")
 
@@ -859,6 +871,13 @@ class MainWindow(QMainWindow):
         """Handle build cancellation."""
         self._restore_ui()
         self.progress_bar.setValue(0)
+
+        # Let Qt manage worker lifetime to avoid GC racing with QThread.finished
+        worker = self.build_worker or self.batch_worker
+        self.build_worker = None
+        self.batch_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
         self.log_view.log("\n[INFO] Build cancelled.")
         self.log_view.log("[INFO] Ready.")
@@ -890,6 +909,12 @@ class MainWindow(QMainWindow):
         """Handle batch build completion."""
         self._restore_ui()
         self.progress_bar.setValue(100)
+
+        # Let Qt manage worker lifetime to avoid GC racing with QThread.finished
+        worker = self.batch_worker
+        self.batch_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
         total = succeeded + failed
         self.log_view.log(f"\n[DONE] Batch build complete: {succeeded}/{total} succeeded, {failed}/{total} failed.")
