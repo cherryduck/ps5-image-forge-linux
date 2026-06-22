@@ -31,7 +31,14 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 
-from ps5_image_forge_linux.builder import CancelledBuild, OutputFormat, build
+from ps5_image_forge_linux.builder import (
+    CancelledBuild,
+    ExfatBatchItem,
+    ExfatBatchResult,
+    OutputFormat,
+    _create_exfat_batch,
+    build,
+)
 from ps5_image_forge_linux.widgets.log_view import LogView
 
 
@@ -66,19 +73,176 @@ class BatchBuildWorker(QThread):
         self._proc: subprocess.Popen | None = None
 
     def run(self) -> None:
-        """Execute all queued builds sequentially."""
+        """Execute all queued builds sequentially.
+
+        EXFAT/FFPFSC items are pre-collected and their privileged mount+copy
+        operations are done in a single pkexec call. FFPKG items run individually.
+        FFPFSC items get their EXFAT image from the batch, then PFS compression
+        runs per-item in Python (no privs needed).
+        """
+        import tempfile as _tf
+
         total = len(self.queue)
         succeeded = 0
         failed = 0
 
+        # ------------------------------------------------------------------
+        # Phase 0: Pre-collect EXFAT/FFPFSC items for batch processing
+        # ------------------------------------------------------------------
+        exfat_batch_items: list[tuple[int, BuildQueueItem, ExfatBatchItem]] = []
+        ffpfsc_exfat_paths: dict[int, Path] = {}  # idx -> temp EXFAT path for FFPFSC
+        non_exfat_indices: list[int] = []
+
+        for idx, item in enumerate(self.queue):
+            if item.is_file_input:
+                # File input -> FFPFSC only, no EXFAT creation needed
+                non_exfat_indices.append(idx)
+            elif item.output_format in (OutputFormat.EXFAT, OutputFormat.FFPFSC):
+                # Generate temp output for the EXFAT image
+                stem = item.source.name
+                fd, tmp_exfat = _tf.mkstemp(
+                    dir=str(self.output_dir),
+                    prefix=f".ps5_batch_exfat_{stem}_",
+                    suffix=".exfat.tmp",
+                )
+                import os as _os
+                _os.close(fd)
+                tmp_exfat_path = Path(tmp_exfat)
+
+                batch_item = ExfatBatchItem(
+                    source=item.source,
+                    output_path=tmp_exfat_path,
+                    progress_callback=self._progress_for(idx, total),
+                )
+                exfat_batch_items.append((idx, item, batch_item))
+
+                if item.output_format == OutputFormat.FFPFSC:
+                    # Store the temp path for later PFS compression
+                    ffpfsc_exfat_paths[idx] = tmp_exfat_path
+            else:
+                # FFPKG — no privs needed
+                non_exfat_indices.append(idx)
+
+        # ------------------------------------------------------------------
+        # Phase 1: Batch EXFAT creation (single pkexec)
+        # ------------------------------------------------------------------
+        if exfat_batch_items:
+            batch_list = [bi for _, _, bi in exfat_batch_items]
+
+            self.log.emit(f"\n[INFO] Batch EXFAT creation: {len(batch_list)} image(s) (password prompt may appear)...")
+
+            results = _create_exfat_batch(
+                items=batch_list,
+                log_callback=self._log,
+                cancel_event=self._cancel_event,
+            )
+
+            if self._cancel_event.is_set():
+                self.cancelled.emit()
+                # Clean up temp EXFAT files
+                for _, _, bi in exfat_batch_items:
+                    bi.output_path.unlink(missing_ok=True)
+                return
+
+            # Track batch results
+            batch_results: dict[int, ExfatBatchResult] = {}
+            for i, (idx, item, _) in enumerate(exfat_batch_items):
+                batch_results[idx] = results[i]
+
+            # Process batch results
+            for idx, item, batch_item in exfat_batch_items:
+                if self._cancel_event.is_set():
+                    break
+
+                result = batch_results[idx]
+                source_name = item.source.name
+                self.batch_item_start.emit(idx, total, source_name, item.output_format)
+
+                if not result.success:
+                    # Clean up temp file
+                    batch_item.output_path.unlink(missing_ok=True)
+                    self.batch_item_failed.emit(idx, result.error or "EXFAT creation failed")
+                    failed += 1
+                    continue
+
+                if item.output_format == OutputFormat.EXFAT:
+                    # Rename temp to final output
+                    final_path = self.output_dir / f"{item.source.name}.exfat"
+                    if final_path.exists():
+                        final_path.unlink()
+                    batch_item.output_path.rename(final_path)
+                    self.batch_item_done.emit(idx, str(final_path))
+                    succeeded += 1
+                # FFPFSC: handled in phase 2 below
+
+        # ------------------------------------------------------------------
+        # Phase 2: FFPFSC PFS compression (per item, no privs)
+        # ------------------------------------------------------------------
         for idx, item in enumerate(self.queue):
             if self._cancel_event.is_set():
                 break
 
+            # Skip non-FFPFSC items (already handled or will be handled below)
+            if item.output_format != OutputFormat.FFPFSC or item.is_file_input:
+                continue
+
+            if idx not in ffpfsc_exfat_paths:
+                continue
+
+            exfat_path = ffpfsc_exfat_paths[idx]
+            if not exfat_path.exists():
+                self.batch_item_start.emit(idx, total, item.source.name, item.output_format)
+                self.batch_item_failed.emit(idx, "EXFAT image not found from batch")
+                failed += 1
+                continue
+
             source_name = item.source.name
             self.batch_item_start.emit(idx, total, source_name, item.output_format)
 
-            def _track_proc(proc: subprocess.Popen) -> None:
+            try:
+                result = build(
+                    source=exfat_path,
+                    output_dir=self.output_dir,
+                    output_format=OutputFormat.FFPFSC,
+                    is_file_input=True,
+                    log_callback=self._log,
+                    progress_callback=self._progress_for(idx, total),
+                    cancel_event=self._cancel_event,
+                    proc_callback=lambda proc, _idx=idx: setattr(self, '_proc', proc),
+                )
+                # Rename to use source name instead of temp name
+                final_path = self.output_dir / f"{item.source.name}.ffpfsc"
+                if final_path.exists():
+                    final_path.unlink()
+                result.rename(final_path)
+                self.batch_item_done.emit(idx, str(final_path))
+                succeeded += 1
+            except CancelledBuild:
+                self.cancelled.emit()
+                exfat_path.unlink(missing_ok=True)
+                return
+            except KeyboardInterrupt:
+                self.cancelled.emit()
+                exfat_path.unlink(missing_ok=True)
+                return
+            except Exception as e:
+                self.batch_item_failed.emit(idx, str(e))
+                failed += 1
+            finally:
+                exfat_path.unlink(missing_ok=True)
+
+        # ------------------------------------------------------------------
+        # Phase 3: FFPKG items (no privs needed)
+        # ------------------------------------------------------------------
+        for idx in non_exfat_indices:
+            if self._cancel_event.is_set():
+                break
+
+            item = self.queue[idx]
+            source_name = item.source.name
+            self.batch_item_start.emit(idx, total, source_name, item.output_format)
+
+            def _track_proc(proc: subprocess.Popen, _idx=idx) -> None:
                 self._proc = proc
 
             try:
