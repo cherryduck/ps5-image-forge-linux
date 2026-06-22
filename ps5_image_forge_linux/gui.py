@@ -51,7 +51,7 @@ class BatchBuildWorker(QThread):
     batch_item_start = pyqtSignal(int, int, str, str)  # idx, total, source_name, fmt
     batch_item_done = pyqtSignal(int, str)  # idx, output_path
     batch_item_failed = pyqtSignal(int, str)  # idx, error_msg
-    finished = pyqtSignal(int, int)  # succeeded, failed
+    batch_finished = pyqtSignal(int, int)  # succeeded, failed  (renamed to avoid shadowing QThread.finished)
     cancelled = pyqtSignal()
 
     def __init__(
@@ -104,7 +104,7 @@ class BatchBuildWorker(QThread):
                 self.batch_item_failed.emit(idx, str(e))
                 failed += 1
 
-        self.finished.emit(succeeded, failed)
+        self.batch_finished.emit(succeeded, failed)
 
     def _progress_for(self, idx: int, total: int):
         """Return a progress callback that scales within this item's slice."""
@@ -156,7 +156,7 @@ class BuildWorker(QThread):
 
     log = pyqtSignal(str)
     progress = pyqtSignal(int)
-    finished = pyqtSignal(str)  # output path
+    build_finished = pyqtSignal(str)  # output path  (renamed to avoid shadowing QThread.finished)
     error = pyqtSignal(str)  # error message
     cancelled = pyqtSignal()  # emitted when user cancels
 
@@ -191,7 +191,7 @@ class BuildWorker(QThread):
                 cancel_event=self._cancel_event,
                 proc_callback=_track_proc,
             )
-            self.finished.emit(str(result))
+            self.build_finished.emit(str(result))
         except CancelledBuild:
             self.cancelled.emit()
         except KeyboardInterrupt:
@@ -765,7 +765,7 @@ class MainWindow(QMainWindow):
         )
         self.build_worker.log.connect(self._on_log)
         self.build_worker.progress.connect(self._on_progress)
-        self.build_worker.finished.connect(self._on_build_finished)
+        self.build_worker.build_finished.connect(self._on_build_finished)
         self.build_worker.error.connect(self._on_build_error)
         self.build_worker.cancelled.connect(self._on_build_cancelled)
         self.build_worker.start()
@@ -799,7 +799,7 @@ class MainWindow(QMainWindow):
         self.batch_worker.batch_item_start.connect(self._on_batch_item_start)
         self.batch_worker.batch_item_done.connect(self._on_batch_item_done)
         self.batch_worker.batch_item_failed.connect(self._on_batch_item_failed)
-        self.batch_worker.finished.connect(self._on_batch_finished)
+        self.batch_worker.batch_finished.connect(self._on_batch_finished)
         self.batch_worker.cancelled.connect(self._on_build_cancelled)
         self.batch_worker.start()
 
