@@ -669,7 +669,7 @@ def _build_folder_to_ffpfsc(
         # Step 1: Create EXFAT image using our helper (single pkexec)
         import tempfile as _tf
         exfat_tmp = _tf.NamedTemporaryFile(
-            dir=str(output_dir), prefix=".", suffix=".exfat", delete=False
+            dir=str(output_dir), prefix="ps5_ffpfsc_", suffix=".exfat", delete=False
         )
         exfat_tmp.close()
         exfat_path = Path(exfat_tmp.name)

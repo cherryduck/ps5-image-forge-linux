@@ -1,0 +1,73 @@
+FROM python:3.14-slim
+
+# Conservative compiler flags for x86-64-v2 compatibility (Sandy Bridge+, ~2011)
+# Ensures binaries run on any x86-64 CPU from the last 15+ years.
+# Covers: SSE4.1, SSE4.2, SSSE3, POPCNT, AES-NI, AVX, OSXSAVE
+ENV CFLAGS="-march=x86-64-v2 -O2"
+ENV CXXFLAGS="-march=x86-64-v2 -O2"
+ENV RUSTFLAGS="-C target-cpu=x86-64-v2 -C opt-level=2"
+
+# Install system deps: build tools, crypto libs, Qt runtime libs, Rust toolchain
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    libssl-dev \
+    libffi-dev \
+    libfontconfig1 \
+    libfreetype6 \
+    libxkbcommon-x11-0 \
+    libdbus-1-3 \
+    libgl1 \
+    libegl1 \
+    libglx-mesa0 \
+    libsqlite3-0 \
+    libexpat1 \
+    libharfbuzz0b \
+    libpcre2-8-0 \
+    nasm \
+    pkg-config \
+    curl \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add cargo to PATH for Rust compilation
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /src
+
+# Create virtual environment
+RUN python -m venv /src/.venv
+ENV PATH="/src/.venv/bin:${PATH}"
+
+# Copy project files (respects .dockerignore)
+COPY pyproject.toml ./
+COPY README.md ./
+COPY ps5_image_forge_linux ./ps5_image_forge_linux
+COPY hooks ./hooks
+COPY scripts ./scripts
+COPY vendor/lazy_mkpfs/lazy_mkpfs ./vendor/lazy_mkpfs/lazy_mkpfs
+COPY ps5-image-forge-linux.spec ./
+
+# Install deps in two steps:
+# 1) Install PyInstaller + project deps (PyQt6, etc. from wheels — already generic)
+# 2) Force-rebuild isal + cryptography from source with our conservative CFLAGS/RUSTFLAGS
+#    (PyPI wheels for these may contain AVX-512 instructions from the builder's CPU)
+RUN pip install --no-cache-dir pyinstaller && \
+    pip install --no-cache-dir -e . && \
+    pip install --no-cache-dir --force-reinstall --no-binary :all: \
+    isal cryptography
+
+# Copy lazy_mkpfs into site-packages for PyInstaller to detect (same as build.sh)
+RUN python3 -c "import site; sp = site.getsitepackages()[0]; \
+    import shutil, os; \
+    src = '/src/vendor/lazy_mkpfs/lazy_mkpfs'; \
+    dst = os.path.join(sp, 'lazy_mkpfs'); \
+    shutil.copytree(src, dst) if not os.path.isdir(dst) else None"
+
+# Patch lazy_mkpfs for PyInstaller compatibility (skip auto-install loops)
+RUN python3 scripts/patch-lazy-mkpfs.py
+
+# Build from spec file
+RUN pyinstaller --clean ps5-image-forge-linux.spec

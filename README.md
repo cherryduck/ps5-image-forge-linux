@@ -45,11 +45,30 @@ python -m ps5_image_forge_linux
 
 ## Building standalone app
 
-```bash
-# Build with PyInstaller (produces dist/ps5-image-forge-linux/)
-bash scripts/build.sh
+### Native build (fast, dev iteration)
 
-# Install desktop entry + icon (appears in app launcher)
+```bash
+bash scripts/build.sh
+```
+
+Builds on your native CPU. Fast for development, but the resulting binaries
+may use CPU instructions (e.g. AVX-512) not available on older machines.
+
+### Docker build (recommended for distribution)
+
+```bash
+bash scripts/build-docker.sh
+```
+
+Builds inside a Docker container with conservative compiler flags
+(`-march=x86-64-v2`), producing binaries compatible with any x86-64 CPU
+from Sandy Bridge (2011) onward — including Ryzen Zen 2, Intel 4th gen+, etc.
+
+Verifies the output contains no AVX-512 instructions before reporting success.
+
+### Install desktop entry
+
+```bash
 bash scripts/install-desktop.sh
 ```
 

@@ -1,0 +1,34 @@
+# Build output
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Git
+.git/
+.gitmodules
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Plan/recovery docs (not needed in build)
+PLAN.md
+RECOVERY.md
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Container artifacts
+*.tar.gz
+*.zip
+
+# Compiled extensions (not sources)
+*.so
+*.egg-info/
+*.egg
