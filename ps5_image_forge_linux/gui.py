@@ -304,12 +304,6 @@ class MainWindow(QMainWindow):
         source_row.addWidget(self.source_edit, 1)
         source_row.addWidget(source_browse)
 
-        # Add to Queue button
-        self.add_queue_btn = self._styled_button("Add to Queue")
-        self.add_queue_btn.setEnabled(False)
-        self.add_queue_btn.clicked.connect(self._add_to_queue)
-        source_row.addWidget(self.add_queue_btn)
-
         main_layout.addLayout(source_row)
 
         # Source info
@@ -430,6 +424,15 @@ class MainWindow(QMainWindow):
         self.output_filename = QLabel("")
         self.output_filename.setStyleSheet("color: #888888; font-size: 11px;")
         main_layout.addWidget(self.output_filename)
+
+        # Add to Queue button (placed after output dir so format is already selected)
+        self.add_queue_btn = self._styled_button("Add to Queue")
+        self.add_queue_btn.setEnabled(False)
+        self.add_queue_btn.clicked.connect(self._add_to_queue)
+        add_queue_row = QHBoxLayout()
+        add_queue_row.addWidget(self.add_queue_btn)
+        add_queue_row.addStretch()
+        main_layout.addLayout(add_queue_row)
 
         # --- Buttons ---
         button_row = QHBoxLayout()
