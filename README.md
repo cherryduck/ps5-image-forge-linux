@@ -2,11 +2,14 @@
 
 A self-contained Linux GUI application for creating PS5 game dump images in multiple formats: FFPKG (UFS2), EXFAT, and FFPFSC.
 
+![Screenshot](screenshot.png)
+
 ## Features
 
 - **FFPKG**: UFS2 filesystem image via UFS2Tool
 - **EXFAT**: Raw EXFAT filesystem image
 - **FFPFSC**: Compressed PFS with EXFAT wrapper, or compressed from existing image file
+- **Batch conversion queue**: queue multiple source items with individual output formats, build them sequentially with per-item progress, and cancel mid-batch
 - Auto-detect game root via `eboot.bin`
 - Title ID extraction from `param.json`
 - Parallel compression with Intel ISA-L / zlib-ng support
@@ -78,10 +81,9 @@ The standalone app is self-contained — no Python or venv needed at runtime.
 
 This project builds on the work of:
 
-- **[Lazy_MkPFS](https://github.com/Nazky/Lazy_MkPFS)** by **Nazky** — PFS compression engine, EXFAT creation, and folder packaging logic. Used as the core compression and filesystem backend.
-- **[PSFFPKG](https://github.com/sinajet/PSFFPKG/)** by **sinajet** — UFS2Tool and FFPKG packaging tools. Used for building UFS2 filesystem images.
-
-Both projects are used as submodules and integrated into this Linux GUI wrapper.
+- **[Lazy_MkPFS](https://github.com/Nazky/Lazy_MkPFS)** by **Nazky** — PFS compression engine, EXFAT creation, and folder packaging logic. Used as the core compression and filesystem backend (included as a submodule).
+- **[PSFFPKG](https://github.com/sinajet/PSFFPKG/)** by **sinajet** — FFPKG packaging logic. The FFPKG build pipeline in this project is based on the approach used in PSFFPKG.
+- **[UFS2Tool](https://github.com/SvenGDK/UFS2Tool)** by **SvenGDK** — FreeBSD UFS1/UFS2 filesystem manager. Used for creating UFS2 filesystem images (FFPKG format). Download separately from the [releases page](https://github.com/SvenGDK/UFS2Tool/releases).
 
 ## License
 
