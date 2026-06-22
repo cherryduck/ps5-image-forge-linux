@@ -348,26 +348,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.file_formats)
         self.file_formats.hide()
 
-        # --- Output Directory Section ---
-        output_label = QLabel("Output Directory")
-        output_label.setStyleSheet("font-weight: bold; font-size: 13px;")
-        main_layout.addWidget(output_label)
-
-        output_row = QHBoxLayout()
-        self.output_edit = QLabel("Not selected")
-        self.output_edit.setStyleSheet("background: #2d2d2d; color: #cccccc; padding: 6px; border-radius: 4px;")
-        output_browse = self._styled_button("Browse...")
-        output_browse.clicked.connect(self._browse_output)
-        output_row.addWidget(self.output_edit, 1)
-        output_row.addWidget(output_browse)
-        main_layout.addLayout(output_row)
-
-        # Output filename preview
-        self.output_filename = QLabel("")
-        self.output_filename.setStyleSheet("color: #888888; font-size: 11px;")
-        main_layout.addWidget(self.output_filename)
-
-         # Add to Queue button (placed after output dir so format is already selected)
+        # --- Add to Queue button (placed after format so it's already selected) ---
         self.add_queue_btn = self._styled_button("Add to Queue")
         self.add_queue_btn.setEnabled(False)
         self.add_queue_btn.clicked.connect(self._add_to_queue)
@@ -433,6 +414,25 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(queue_section)
         self._queue_section = queue_section
+
+        # --- Output Directory Section ---
+        output_label = QLabel("Output Directory")
+        output_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        main_layout.addWidget(output_label)
+
+        output_row = QHBoxLayout()
+        self.output_edit = QLabel("Not selected")
+        self.output_edit.setStyleSheet("background: #2d2d2d; color: #cccccc; padding: 6px; border-radius: 4px;")
+        output_browse = self._styled_button("Browse...")
+        output_browse.clicked.connect(self._browse_output)
+        output_row.addWidget(self.output_edit, 1)
+        output_row.addWidget(output_browse)
+        main_layout.addLayout(output_row)
+
+        # Output filename preview
+        self.output_filename = QLabel("")
+        self.output_filename.setStyleSheet("color: #888888; font-size: 11px;")
+        main_layout.addWidget(self.output_filename)
 
         # --- Buttons ---
         button_row = QHBoxLayout()
