@@ -438,11 +438,195 @@ def _create_exfat_helper(
     progress_callback: Callable[[int], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> Path:
-    """Create exFAT image using a helper script for single-elevation.
+    """Create exFAT image using root helper (preferred) or shell script (fallback).
 
-    Uses a shell script run via pkexec so all privileged operations
-    (losetup, mount, umount, losetup -d) happen in one auth prompt.
+    Tries the root helper daemon first (no auth prompt needed). Falls back to
+    pkexec + shell script if the helper is not available.
     """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Try root helper first (no auth prompt needed)
+    try:
+        from ps5_image_forge_linux.main import (
+            _is_root_helper_running,
+            _root_helper_call,
+        )
+        if _is_root_helper_running():
+            if log_callback:
+                log_callback("[INFO] Using root helper for exFAT creation...")
+            return _create_exfat_via_root_helper(
+                source, output_path, log_callback, progress_callback, cancel_event,
+            )
+    except Exception:
+        pass  # Fall back to shell script
+
+    # Fallback: shell script via pkexec (single auth prompt)
+    if log_callback:
+        log_callback("[INFO] Root helper not available, using pkexec fallback...")
+    return _create_exfat_via_shell(
+        source, output_path, log_callback, progress_callback, cancel_event,
+    )
+
+
+def _create_exfat_via_root_helper(
+    source: Path,
+    output_path: Path,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    """Create exFAT image using the root helper daemon via Unix socket."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    from ps5_image_forge_linux.main import _root_helper_call
+
+    output_path = output_path.resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Progress file for root helper to write to
+    progress_file = None
+    if progress_callback:
+        progress_file = tempfile.mktemp(
+            prefix=".exfat_progress_", suffix=".pct",
+            dir=str(output_path.parent),
+        )
+
+    try:
+        # 1. Calculate image size
+        total_size = 0
+        for dirpath, _, filenames in os.walk(source):
+            for f in filenames:
+                fp = Path(dirpath) / f
+                if fp.is_file():
+                    total_size += fp.stat().st_size
+
+        image_size = max(total_size * 1.15 + 100 * 1024 * 1024, 1 * 1024 * 1024 * 1024)
+        image_size_mb = int(image_size / (1024 * 1024))
+
+        if log_callback:
+            log_callback(f"[INFO] Creating {image_size_mb}MB exFAT image ({total_size / (1024**3):.1f}GB source)...")
+
+        # 2. Create sparse image
+        fd, tmp_image = tempfile.mkstemp(
+            dir=str(output_path.parent),
+            prefix=".ps5_exfat_",
+            suffix=".tmp",
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_image)
+
+        try:
+            image_size_bytes = image_size_mb * 1024 * 1024
+            subprocess.run(
+                ["truncate", "-s", str(image_size_bytes), str(tmp_path)],
+                check=True, capture_output=True, text=True,
+            )
+
+            # 3. Format
+            if log_callback:
+                log_callback("[INFO] Formatting exFAT...")
+
+            mkfs = shutil.which("mkfs.exfat") or shutil.which("mkfs.exfat-fs")
+            if not mkfs:
+                raise RuntimeError(
+                    "mkfs.exfat not found. Install exfatprogs: "
+                    "sudo pacman -S exfatprogs"
+                )
+
+            result = subprocess.run(
+                [mkfs, "-f", str(tmp_path)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                err = result.stderr or result.stdout or "unknown error"
+                if "28" in err or "No space" in err:
+                    if log_callback:
+                        log_callback("[WARN] Sparse file failed, trying fallocate...")
+                    subprocess.run(
+                        ["fallocate", "-l", str(image_size_bytes), str(tmp_path)],
+                        check=True, capture_output=True, text=True,
+                    )
+                    result = subprocess.run(
+                        [mkfs, "-f", str(tmp_path)],
+                        capture_output=True, text=True,
+                    )
+                if result.returncode != 0:
+                    raise RuntimeError(f"mkfs.exfat failed: {err}")
+
+            # 4. Mount and copy via root helper
+            if log_callback:
+                log_callback("[INFO] Mounting and copying files...")
+
+            uid = os.getuid()
+            gid = os.getgid()
+
+            request = {
+                "cmd": "mount_exfat",
+                "image": str(tmp_path),
+                "source": str(source),
+                "uid": uid,
+                "gid": gid,
+            }
+            if progress_file:
+                request["progress_file"] = progress_file
+
+            # Watch progress file in background thread
+            progress_thread = None
+            if progress_file and progress_callback:
+                progress_thread = threading.Thread(
+                    target=_watch_exfat_progress,
+                    args=(Path(progress_file), progress_callback, cancel_event),
+                    daemon=True,
+                )
+                progress_thread.start()
+
+            # Call root helper (blocks until done)
+            response = _root_helper_call(request, timeout=3600.0)
+
+            # Stop progress watching
+            if progress_thread:
+                progress_thread.join(timeout=2)
+
+            # Check for cancellation
+            if cancel_event and cancel_event.is_set():
+                raise CancelledBuild()
+
+            if not response.get("ok"):
+                raise RuntimeError(f"Root helper failed: {response.get('error', 'unknown')}")
+
+            # 5. Rename to final output
+            if output_path.exists():
+                output_path.unlink()
+            tmp_path.rename(output_path)
+
+            return output_path
+
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    finally:
+        if progress_file:
+            Path(progress_file).unlink(missing_ok=True)
+
+
+def _create_exfat_via_shell(
+    source: Path,
+    output_path: Path,
+    log_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> Path:
+    """Create exFAT image using shell script via pkexec (fallback)."""
     import os
     import shutil
     import subprocess
@@ -458,8 +642,6 @@ def _create_exfat_helper(
     helper_script = helper_script.resolve()
 
     # Progress file for helper script to write to.
-    # Place it in the output directory (not /tmp) because pkexec may run in a
-    # different mount namespace where /tmp is inaccessible regardless of perms.
     progress_file = None
     if progress_callback:
         progress_file = tempfile.mktemp(
@@ -668,10 +850,10 @@ def _create_exfat_batch(
     log_callback: Callable[[str], None] | None = None,
     cancel_event: threading.Event | None = None,
 ) -> list[ExfatBatchResult]:
-    """Create multiple exFAT images using a single pkexec call.
+    """Create multiple exFAT images, preferring root helper (no auth prompt).
 
-    All items go through one shell script invocation, so the user only
-    sees one authentication prompt regardless of batch size.
+    Tries the root helper daemon first (single auth at startup). Falls back to
+    a single pkexec call to the shell script if the helper is not available.
 
     Args:
         items: List of (source, output_path, progress_callback) tuples.
@@ -681,6 +863,256 @@ def _create_exfat_batch(
     Returns:
         List of ExfatBatchResult, one per item, in the same order as items.
     """
+    # Try root helper first
+    try:
+        from ps5_image_forge_linux.main import _is_root_helper_running
+        if _is_root_helper_running():
+            if log_callback:
+                log_callback("[INFO] Using root helper for batch EXFAT creation...")
+            return _create_exfat_batch_via_root_helper(
+                items, log_callback, cancel_event,
+            )
+    except Exception:
+        pass  # Fall back to shell script
+
+    # Fallback: single pkexec call to shell script
+    if log_callback:
+        log_callback("[INFO] Root helper not available, using pkexec fallback...")
+    return _create_exfat_batch_via_shell(
+        items, log_callback, cancel_event,
+    )
+
+
+def _create_exfat_batch_via_root_helper(
+    items: list[ExfatBatchItem],
+    log_callback: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> list[ExfatBatchResult]:
+    """Create multiple exFAT images via the root helper daemon."""
+    import os as _os
+    import shutil as _shutil
+    import subprocess as _subprocess
+    import tempfile as _tf
+
+    from ps5_image_forge_linux.main import _root_helper_call
+
+    if not items:
+        return []
+
+    # Resolve all output paths upfront
+    for item in items:
+        item.output_path = item.output_path.resolve()
+        item.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Find mkfs.exfat
+    mkfs = _shutil.which("mkfs.exfat") or _shutil.which("mkfs.exfat-fs")
+    if not mkfs:
+        raise RuntimeError(
+            "mkfs.exfat not found. Install exfatprogs: "
+            "sudo pacman -S exfatprogs"
+        )
+
+    # Phase 1: Create sparse images and format them (no privs needed)
+    tmp_paths: list[Path] = []
+    progress_files: list[str] = []
+    errors_during_setup: list[ExfatBatchResult] = []
+
+    for idx, item in enumerate(items):
+        source = item.source
+        output_path = item.output_path
+        log = f"[batch:{idx}]"
+
+        # Calculate image size
+        total_size = 0
+        for dirpath, _, filenames in _os.walk(source):
+            for f in filenames:
+                fp = Path(dirpath) / f
+                if fp.is_file():
+                    total_size += fp.stat().st_size
+
+        image_size = max(total_size * 1.15 + 100 * 1024 * 1024, 1 * 1024 * 1024 * 1024)
+        image_size_mb = int(image_size / (1024 * 1024))
+        image_size_bytes = image_size_mb * 1024 * 1024
+
+        if log_callback:
+            log_callback(f"{log} Creating {image_size_mb}MB exFAT image ({total_size / (1024**3):.1f}GB source)...")
+
+        # Create temp image
+        fd, tmp_image = _tf.mkstemp(
+            dir=str(output_path.parent),
+            prefix=".ps5_exfat_batch_",
+            suffix=".tmp",
+        )
+        _os.close(fd)
+        tmp_path = Path(tmp_image)
+        tmp_paths.append(tmp_path)
+
+        # Truncate (sparse)
+        try:
+            _subprocess.run(
+                ["truncate", "-s", str(image_size_bytes), str(tmp_path)],
+                check=True, capture_output=True, text=True,
+            )
+        except _subprocess.CalledProcessError:
+            tmp_path.unlink(missing_ok=True)
+            if log_callback:
+                log_callback(f"{log} ERROR: truncate failed")
+            errors_during_setup.append(ExfatBatchResult(output_path, False, "truncate failed"))
+            progress_files.append("")
+            continue
+
+        # Format
+        if log_callback:
+            log_callback(f"{log} Formatting exFAT...")
+        result = _subprocess.run([mkfs, "-f", str(tmp_path)], capture_output=True, text=True)
+        if result.returncode != 0:
+            err = result.stderr or result.stdout or "unknown error"
+            if "28" in err or "No space" in err:
+                if log_callback:
+                    log_callback(f"{log} WARN: Sparse file failed, trying fallocate...")
+                try:
+                    _subprocess.run(
+                        ["fallocate", "-l", str(image_size_bytes), str(tmp_path)],
+                        check=True, capture_output=True, text=True,
+                    )
+                    result = _subprocess.run([mkfs, "-f", str(tmp_path)], capture_output=True, text=True)
+                except Exception:
+                    pass
+            if result.returncode != 0:
+                tmp_path.unlink(missing_ok=True)
+                if log_callback:
+                    log_callback(f"{log} ERROR: mkfs.exfat failed: {err}")
+                errors_during_setup.append(ExfatBatchResult(output_path, False, f"mkfs.exfat failed: {err}"))
+                progress_files.append("")
+                continue
+
+        # Progress file for this item
+        pf = _tf.mktemp(
+            prefix=".exfat_batch_progress_", suffix=".pct",
+            dir=str(output_path.parent),
+        )
+        progress_files.append(pf)
+
+        if log_callback:
+            log_callback(f"{log} Ready for batch mount+copy.")
+
+    # If all items failed during setup, return early
+    if len(errors_during_setup) == len(items):
+        return errors_during_setup
+
+    # Phase 2: Build request for root helper
+    uid = _os.getuid()
+    gid = _os.getgid()
+
+    helper_items = []
+    valid_indices: list[int] = []
+    for idx, item in enumerate(items):
+        if not tmp_paths[idx].exists():
+            progress_files[idx] = ""
+            continue
+        helper_items.append({
+            "image": str(tmp_paths[idx]),
+            "source": str(item.source),
+            "uid": uid,
+            "gid": gid,
+            "progress_file": progress_files[idx],
+        })
+        valid_indices.append(idx)
+
+    if not helper_items:
+        return errors_during_setup
+
+    if log_callback:
+        log_callback(f"[INFO] Mounting and copying {len(helper_items)} image(s)...")
+
+    # Start progress watchers
+    progress_threads: list[threading.Thread] = []
+    for idx in valid_indices:
+        item = items[idx]
+        pf = progress_files[idx]
+        if item.progress_callback and pf:
+            t = threading.Thread(
+                target=_watch_exfat_progress,
+                args=(Path(pf), item.progress_callback, cancel_event),
+                daemon=True,
+            )
+            t.start()
+            progress_threads.append(t)
+
+    # Send batch request to root helper
+    request = {
+        "cmd": "batch_mount_exfat",
+        "items": helper_items,
+    }
+
+    response = _root_helper_call(request, timeout=7200.0)
+
+    # Stop progress watchers
+    for t in progress_threads:
+        t.join(timeout=2)
+
+    # Check for cancellation
+    if cancel_event and cancel_event.is_set():
+        for tmp in tmp_paths:
+            tmp.unlink(missing_ok=True)
+        for pf in progress_files:
+            Path(pf).unlink(missing_ok=True) if pf else None
+        # Return partial results (all marked as failed)
+        return [ExfatBatchResult(item.output_path, False, "cancelled") for item in items]
+
+    if not response.get("ok"):
+        raise RuntimeError(f"Root helper batch failed: {response.get('error', 'unknown')}")
+
+    # Parse results from helper response
+    helper_results = response.get("results", [])
+    results: list[ExfatBatchResult] = []
+
+    # Map helper results back to original item order
+    helper_result_map: dict[int, dict] = {}
+    for hr in helper_results:
+        helper_result_map[hr["index"]] = hr
+
+    for idx, item in enumerate(items):
+        if idx in helper_result_map:
+            hr = helper_result_map[idx]
+            results.append(ExfatBatchResult(
+                item.output_path,
+                hr.get("ok", False),
+                hr.get("error"),
+            ))
+        elif tmp_paths[idx].exists():
+            # Setup succeeded but no helper result — shouldn't happen
+            results.append(ExfatBatchResult(item.output_path, False, "no result from helper"))
+        else:
+            # Already failed during setup
+            results.append(ExfatBatchResult(item.output_path, False, "setup failed"))
+
+    # Phase 3: Rename successful temp files to final output paths
+    for i, result in enumerate(results):
+        if result.success and tmp_paths[i].exists():
+            output_path = items[i].output_path
+            if output_path.exists():
+                output_path.unlink()
+            try:
+                tmp_paths[i].rename(output_path)
+            except Exception as e:
+                results[i] = ExfatBatchResult(output_path, False, f"rename failed: {e}")
+
+    # Clean up temp files and progress files
+    for tmp in tmp_paths:
+        tmp.unlink(missing_ok=True)
+    for pf in progress_files:
+        Path(pf).unlink(missing_ok=True) if pf else None
+
+    return results
+
+
+def _create_exfat_batch_via_shell(
+    items: list[ExfatBatchItem],
+    log_callback: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> list[ExfatBatchResult]:
+    """Create multiple exFAT images via pkexec + shell script (fallback)."""
     import os as _os
     import shutil as _shutil
     import subprocess as _subprocess

@@ -410,9 +410,10 @@ class BuildWorker(QThread):
 class MainWindow(QMainWindow):
     """Main application window."""
 
-    def __init__(self, backend_name: str = "unknown") -> None:
+    def __init__(self, backend_name: str = "unknown", helper_available: bool = False) -> None:
         super().__init__()
         self.backend_name = backend_name
+        self.helper_available = helper_available
 
         self.source_path: Optional[Path] = None
         self.is_file_input = False
