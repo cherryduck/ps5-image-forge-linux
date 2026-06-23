@@ -10,6 +10,7 @@ A self-contained Linux GUI application for creating PS5 game dump images in mult
 - **EXFAT**: Raw EXFAT filesystem image
 - **FFPFSC**: Compressed PFS with EXFAT wrapper, or compressed from existing image file
 - **Batch conversion queue**: queue multiple source items with individual output formats, build them sequentially with per-item progress, and cancel mid-batch
+- **Single credential prompt**: root helper daemon authenticates once at startup via `pkexec`, eliminating per-build password prompts
 - Auto-detect game root via `eboot.bin`
 - Title ID extraction from `param.json`
 - Parallel compression with Intel ISA-L / zlib-ng support
