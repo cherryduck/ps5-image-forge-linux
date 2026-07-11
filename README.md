@@ -32,7 +32,7 @@ A self-contained Linux GUI application for creating PS5 game dump images in mult
 
 ```bash
 # Clone with submodules
-git clone --recursive https://github.com/<user>/ps5-image-forge-linux.git
+git clone --recursive https://github.com/cherryduck/ps5-image-forge-linux.git
 cd ps5-image-forge-linux
 
 # Create virtual environment
